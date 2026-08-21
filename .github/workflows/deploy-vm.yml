@@ -1,0 +1,22 @@
+name: Deploy to MeerkatX VM
+
+on:
+  push:
+    branches:
+      - feature/InjecAgent
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VM_SSH_KEY }}" > ~/.ssh/vm_key
+          chmod 600 ~/.ssh/vm_key
+          ssh-keyscan -H "${{ secrets.VM_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Run deploy script on VM
+        run: |
+          ssh -i ~/.ssh/vm_key "${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}" "~/deploy.sh"
