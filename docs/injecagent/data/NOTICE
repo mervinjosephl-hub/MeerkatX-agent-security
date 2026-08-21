@@ -1,0 +1,21 @@
+This directory vendors data from InjecAgent:
+
+  InjecAgent: Benchmarking Indirect Prompt Injections in Tool-Integrated
+  Large Language Model Agents
+  Zhan, Qiusi, et al. arXiv:2403.02691
+  https://github.com/uiuc-kang-lab/InjecAgent
+
+Copyright (c) 2023 Qiusi Zhan. Licensed under the MIT License — see
+LICENSE-injecagent in this directory for the full text.
+
+Vendored files (verbatim, unmodified):
+  attacker_cases_dh.jsonl  - direct-harm attacker-goal cases
+  attacker_cases_ds.jsonl  - data-stealing attacker-goal cases
+
+See data/README.md in this directory for exact provenance (source commit,
+retrieval date) and how to re-sync if the upstream dataset changes.
+
+This directory does not reuse InjecAgent's reference evaluation code
+(ReAct-agent harness, ASR scoring, ground-truth tool schemas) — only the
+attacker-goal taxonomy data, read by injecagent_to_briefing.py to generate
+steering guidance for Strix.

@@ -257,6 +257,10 @@ ignore = [
 # install hint instead of an unreadable traceback; print() is the intended
 # CLI output for this script, not library logging.
 "docs/agentdojo/agentdojo_to_briefing.py" = ["PLC0415", "T201"]
+# Standalone pre-processing scripts (not part of the strix package): print()
+# is the intended CLI output, not library logging.
+"docs/injecagent/injecagent_to_briefing.py" = ["T201"]
+"docs/merge_briefings.py" = ["T201"]
 # Lazy imports inside functions to avoid circular dependency with
 # strix.telemetry / strix.report.dedupe / cvss.
 "strix/tools/notes/tools.py" = ["PLC0415", "TC002"]

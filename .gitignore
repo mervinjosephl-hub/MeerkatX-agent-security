@@ -78,6 +78,9 @@ tensorboard/
 strix_runs/
 agent_runs/
 
+# Generated briefing outputs (docs/run_briefed_scan.sh)
+/briefings/
+
 # Misc
 *.log
 *.sqlite
