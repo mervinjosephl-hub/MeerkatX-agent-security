@@ -70,6 +70,11 @@ dev = [
   "pytest-asyncio>=0.24",
   "types-requests>=2.32",
 ]
+# Not installed by plain `uv sync`. Only needed to run
+# docs/agentdojo/agentdojo_to_briefing.py locally: `uv sync --group agentdojo-tools`.
+agentdojo-tools = [
+  "agentdojo",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -125,6 +130,7 @@ pretty = true
 # Allow some flexibility for third-party libraries
 [[tool.mypy.overrides]]
 module = [
+    "agentdojo.*",
     "litellm.*",
     "rich.*",
     "jinja2.*",
@@ -246,6 +252,11 @@ ignore = [
 "strix/interface/viewer/server.py" = ["N802", "PLC0415"]
 # Lazy telemetry import to avoid importing PostHog before the viewer starts.
 "strix/interface/viewer/cli.py" = ["PLC0415"]
+# Standalone pre-processing script (not part of the strix package): lazy
+# import so a missing optional `agentdojo` dependency fails with a clear
+# install hint instead of an unreadable traceback; print() is the intended
+# CLI output for this script, not library logging.
+"docs/agentdojo/agentdojo_to_briefing.py" = ["PLC0415", "T201"]
 # Lazy imports inside functions to avoid circular dependency with
 # strix.telemetry / strix.report.dedupe / cvss.
 "strix/tools/notes/tools.py" = ["PLC0415", "TC002"]

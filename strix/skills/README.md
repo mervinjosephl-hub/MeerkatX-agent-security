@@ -46,6 +46,7 @@ Notable source-aware skills:
 Notable LLM security skills:
 - `llm_applications` (technologies): end-to-end OWASP 2026 LLM01-LLM10 coverage across models, RAG, vectors, agents, tools, outputs, supply chain, and resource controls
 - `llm_prompt_injection` (vulnerabilities): deep direct, indirect, multimodal, memory, and tool-result prompt-injection testing
+- `agentdojo` (vulnerabilities): AgentDojo-style tool-agent testing — pairs a legitimate user task with a hidden injection task and runs the canonical attack suite (direct, ignore-previous, system-message spoofing, important-instructions, tool-knowledge, chained tool-result redirection) against the target's real tools
 
 ---
 
