@@ -1185,6 +1185,10 @@ def render_new_scan_tab() -> None:
                     scan_mode,
                     "--max-budget",
                     str(max_budget),
+                    # Bound wall-clock time independent of budget — a cheap model can
+                    # buy far more than this many turns within max_budget alone.
+                    "--max-turns",
+                    "20",
                 ]
                 proc = subprocess.Popen(
                     cmd,
