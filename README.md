@@ -158,10 +158,6 @@ ChatGPT subscription rather than an API key, use `STRIX_LLM=chatgpt/<model>`
 Issues and pull requests are welcome — this started as a hackathon build and
 is still actively evolving.
 
-## License
-
-Apache 2.0 — see [`LICENSE`](LICENSE).
-
 ---
 
 > [!WARNING]
