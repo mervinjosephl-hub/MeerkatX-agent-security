@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/logo/meerkatx.png" alt="MeerkatX" width="200" />
+
 # MeerkatX
 
 ### Unified defense for every agent — ship AI apps that survive contact.
@@ -47,8 +49,8 @@ LLM API key from any OpenAI-compatible provider.
 
 ```bash
 # Clone and set up the engine
-git clone https://github.com/mervinjosephl-hub/strix-agent-security.git
-cd strix-agent-security
+git clone https://github.com/mervinjosephl-hub/MeerkatX-agent-security.git
+cd MeerkatX-agent-security
 uv sync
 
 # Configure your LLM provider
