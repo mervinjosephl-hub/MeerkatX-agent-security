@@ -104,7 +104,7 @@ def test_resume_restores_a_target_less_workspace_mount(
     work.mkdir()
     monkeypatch.chdir(tmp_path)
     _write_run_record(
-        tmp_path / "strix_runs",
+        tmp_path / "meerkatx",
         "pentest_abcd",
         {
             "run_name": "pentest_abcd",
@@ -138,7 +138,7 @@ def test_resume_revalidates_persisted_workspace_files(
     kept.write_text("admin\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     _write_run_record(
-        tmp_path / "strix_runs",
+        tmp_path / "meerkatx",
         "pentest_abcd",
         {
             "run_name": "pentest_abcd",
@@ -170,7 +170,7 @@ def test_resume_rejects_an_edited_workspace_file_path(
     source.write_text("admin\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     _write_run_record(
-        tmp_path / "strix_runs",
+        tmp_path / "meerkatx",
         "pentest_abcd",
         {
             "run_name": "pentest_abcd",
@@ -195,7 +195,7 @@ def test_resume_reports_a_missing_workspace_directory(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     _write_run_record(
-        tmp_path / "strix_runs",
+        tmp_path / "meerkatx",
         "pentest_abcd",
         {
             "run_name": "pentest_abcd",
@@ -217,7 +217,7 @@ def test_resume_still_requires_targets_or_a_workspace(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     _write_run_record(
-        tmp_path / "strix_runs",
+        tmp_path / "meerkatx",
         "pentest_abcd",
         {"run_name": "pentest_abcd", "targets_info": [], "local_sources": []},
     )

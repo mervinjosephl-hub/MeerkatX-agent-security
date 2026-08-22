@@ -1,10 +1,15 @@
 """MeerkatX — Streamlit UI for running scans and viewing results.
 
 Run with:
-    uv run --with streamlit --with certifi streamlit run streamlit_ui/app.py
+    uv run --with streamlit --with certifi --with azure-storage-blob streamlit run streamlit_ui/app.py
 
 Requires the Strix repo's own environment to already be set up (uv sync)
 and a .env file at the repo root with STRIX_LLM / LLM_API_KEY / LLM_API_BASE.
+
+Optional: AZURE_STORAGE_CONNECTION_STRING in .env archives each completed
+scan's report to a private "reports" blob container, keyed by run name, and
+the History tab reads back from there instead of local disk. Without it, the
+app works exactly as before — reports stay local-disk only.
 
 Login state lives in Streamlit's session_state, which is per-browser-tab and
 reset on a full page reload — this is a lightweight session-based auth
@@ -16,6 +21,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import html
+import io
 import json
 import os
 import re
@@ -26,11 +32,13 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
 import certifi
 import streamlit as st
+from azure.storage.blob import BlobServiceClient
 
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(\S.*?)\s*$")
@@ -55,6 +63,16 @@ _STATUS_COLORS = {
     "stopped": RED,
     "failed": RED,
     "unknown": FAINT,
+}
+
+# Matches strix/report/writer.py's _SEVERITY_ORDER — lower sorts first (most severe on top).
+_SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+_SEVERITY_COLORS = {
+    "critical": RED,
+    "high": RED,
+    "medium": AMBER,
+    "low": BLUE,
+    "info": STEEL,
 }
 
 
@@ -201,7 +219,7 @@ def render_watch_line(count: int = 27, up_every: int = 6) -> str:
 
 
 REPO_DIR = Path(__file__).resolve().parent.parent
-RUNS_DIR = REPO_DIR / "strix_runs"
+RUNS_DIR = REPO_DIR / "meerkatx"
 ENV_FILE = REPO_DIR / ".env"
 LOG_DIR = REPO_DIR / "streamlit_ui" / "logs"
 DB_PATH = REPO_DIR / "streamlit_ui" / "users.db"
@@ -270,6 +288,7 @@ def init_db() -> None:
             ("cost", "REAL"),
             ("vulnerability_count", "INTEGER"),
             ("updated_at", "TEXT"),
+            ("fileurl", "TEXT"),
         ):
             try:
                 conn.execute(f"ALTER TABLE scan_runs ADD COLUMN {column} {coltype}")
@@ -326,6 +345,51 @@ def sync_run_status(run_dir: Path, run_json: dict) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def set_run_fileurl(run_name: str, fileurl: str) -> None:
+    """Record the blob URL a run's report archive was uploaded to."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            "UPDATE scan_runs SET fileurl = ? WHERE run_name = ?",
+            (fileurl, run_name),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_run_fileurl(run_name: str) -> str | None:
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT fileurl FROM scan_runs WHERE run_name = ?", (run_name,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return row[0] if row and row[0] else None
+
+
+def get_run_row(run_name: str) -> dict | None:
+    """DB-cached {status, cost, vulnerability_count} for one run.
+
+    Fallback for render_results() when local run.json isn't available
+    (e.g. viewing a run on a host where local meerkatx/ never had it, or
+    it was cleaned up) — the DB is kept in sync by sync_run_status().
+    """
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT status, cost, vulnerability_count FROM scan_runs WHERE run_name = ?",
+            (run_name,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    status, cost, vuln_count = row
+    return {"status": status, "cost": cost, "vulnerability_count": vuln_count}
 
 
 def get_user_runs_metadata(user_id: int) -> dict[str, dict]:
@@ -504,7 +568,7 @@ def render_top_nav() -> None:
             unsafe_allow_html=True,
         )
     with col_signup:
-        if st.button("Sign up", key="nav_signup_btn", use_container_width=True):
+        if st.button("Login", key="nav_signup_btn", use_container_width=True):
             st.session_state.show_login = True
             st.rerun()
 
@@ -649,17 +713,12 @@ def render_landing_page() -> None:
             """
         <div class="mx-cta">
           <div class="mx-display mx-cta-line">One target. Three independent checks. One clear decision.</div>
-          <div class="mx-cta-sub">Sign in to run your first assessment.</div>
+          <div class="mx-cta-sub">Sign in above to run your first assessment.</div>
         </div>
         """
         ),
         unsafe_allow_html=True,
     )
-    _, cta_col2, _ = st.columns([2, 1, 2])
-    with cta_col2:
-        if st.button("Log in or sign up", use_container_width=True, key="footer_cta"):
-            st.session_state.show_login = True
-            st.rerun()
 
 
 _AUTH_CSS = """
@@ -791,12 +850,36 @@ def render_auth_gate() -> None:
 # --------------------------------------------------------------------------
 
 
+# (default base URL, provider-specific API key env var) per STRIX_LLM prefix —
+# mirrors, in a simplified form, how strix/config/models.py resolves the same
+# thing for the real scan path (litellm's own per-provider env var lookup).
+# LLM_API_BASE/LLM_API_KEY in .env always override these when explicitly set.
+_PROVIDER_DEFAULTS: dict[str, tuple[str, str]] = {
+    "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"),
+    "openai": ("https://api.openai.com/v1", "LLM_API_KEY"),
+    "anthropic": ("https://api.anthropic.com/v1", "ANTHROPIC_API_KEY"),
+}
+
+
+def _resolve_llm_api_key(env: dict[str, str], model: str | None = None) -> str:
+    """The API key Strix will actually use for ``model`` (STRIX_LLM if omitted) —
+    the provider-specific key (e.g. OPENROUTER_API_KEY) if set, else the generic
+    LLM_API_KEY. Mirrors strix/config/models.py's own key-resolution logic, so
+    UI checks agree with what a real scan subprocess will actually find."""
+    raw_model = model if model is not None else env.get("STRIX_LLM", "")
+    prefix, _, _ = raw_model.partition("/")
+    _, key_env = _PROVIDER_DEFAULTS.get(prefix, ("", "LLM_API_KEY"))
+    return env.get(key_env) or env.get("LLM_API_KEY", "")
+
+
 def call_llm(messages: list[dict[str, str]], env: dict[str, str]) -> str:
-    base = env.get("LLM_API_BASE", "").rstrip("/") or "https://api.openai.com/v1"
-    api_key = env.get("LLM_API_KEY", "")
-    model = env.get("STRIX_LLM", "gpt-4o-mini")
-    if "/" in model:
-        model = model.split("/", 1)[1]
+    raw_model = env.get("STRIX_LLM", "gpt-4o-mini")
+    prefix, _, rest = raw_model.partition("/")
+    model = rest or raw_model
+
+    default_base, _ = _PROVIDER_DEFAULTS.get(prefix, ("https://api.openai.com/v1", "LLM_API_KEY"))
+    base = env.get("LLM_API_BASE", "").rstrip("/") or default_base
+    api_key = _resolve_llm_api_key(env, raw_model)
 
     payload = json.dumps({"model": model, "messages": messages}).encode()
     req = urllib.request.Request(
@@ -932,51 +1015,192 @@ def read_run_json(run_dir: Path) -> dict:
     return data
 
 
+# --------------------------------------------------------------------------
+# Blob storage archival — optional. Reports are zipped and uploaded to a
+# private "reports" container keyed by run name, so they survive past local
+# disk (e.g. a redeploy on ephemeral hosting). Every function here degrades
+# to a no-op / None on missing config or any Azure error — archival must
+# never be able to hide that a scan itself succeeded.
+# --------------------------------------------------------------------------
+
+AZURE_CONTAINER_NAME = "reports"
+
+
+def _get_blob_service_client(env: dict[str, str]) -> BlobServiceClient | None:
+    conn_str = env.get("AZURE_STORAGE_CONNECTION_STRING", "").strip()
+    if not conn_str:
+        return None
+    try:
+        return BlobServiceClient.from_connection_string(conn_str)
+    except Exception:  # noqa: BLE001 - archival is best-effort, never fatal
+        return None
+
+
+def build_report_zip_bytes(run_dir: Path) -> bytes | None:
+    """Zip penetration_test_report.md + vulnerabilities/*.md + findings.sarif.
+
+    Only these three sources — never run.json, strix.log, .state/, or the
+    vulnerabilities.csv/.json siblings, which can carry internal/debug detail.
+    Returns None if none of them exist yet (nothing to archive).
+    """
+    buf = io.BytesIO()
+    wrote_anything = False
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        report_path = run_dir / "penetration_test_report.md"
+        if report_path.exists():
+            zf.writestr("penetration_test_report.md", report_path.read_bytes())
+            wrote_anything = True
+
+        vuln_dir = run_dir / "vulnerabilities"
+        if vuln_dir.exists():
+            for vf in sorted(vuln_dir.glob("*.md")):
+                zf.writestr(f"vulnerabilities/{vf.name}", vf.read_bytes())
+                wrote_anything = True
+
+        sarif_path = run_dir / "findings.sarif"
+        if sarif_path.exists():
+            zf.writestr("findings.sarif", sarif_path.read_bytes())
+            wrote_anything = True
+
+    return buf.getvalue() if wrote_anything else None
+
+
+def upload_report_to_blob(run_dir: Path, run_name: str, env: dict[str, str]) -> str | None:
+    client = _get_blob_service_client(env)
+    if client is None:
+        return None
+    zip_bytes = build_report_zip_bytes(run_dir)
+    if zip_bytes is None:
+        return None
+    try:
+        container = client.get_container_client(AZURE_CONTAINER_NAME)
+        try:
+            container.create_container()
+        except Exception:  # noqa: BLE001 - fine if it already exists
+            pass
+        blob_client = container.upload_blob(
+            name=f"{run_name}.zip", data=zip_bytes, overwrite=True
+        )
+        return blob_client.url
+    except Exception as e:  # noqa: BLE001 - archival is best-effort, never fatal
+        st.warning(f"Report archival to Azure Blob failed (scan result is unaffected): {e}")
+        return None
+
+
+def fetch_report_from_blob(run_name: str, env: dict[str, str]) -> dict | None:
+    """Download and unpack <run_name>.zip. Returns None on any failure."""
+    client = _get_blob_service_client(env)
+    if client is None:
+        return None
+    try:
+        container = client.get_container_client(AZURE_CONTAINER_NAME)
+        data = container.download_blob(f"{run_name}.zip").readall()
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            names = zf.namelist()
+            report = (
+                zf.read("penetration_test_report.md").decode(errors="replace")
+                if "penetration_test_report.md" in names
+                else None
+            )
+            vulnerabilities = {
+                Path(name).name: zf.read(name).decode(errors="replace")
+                for name in names
+                if name.startswith("vulnerabilities/") and name.endswith(".md")
+            }
+            sarif_bytes = zf.read("findings.sarif") if "findings.sarif" in names else None
+        return {"report": report, "vulnerabilities": vulnerabilities, "sarif_bytes": sarif_bytes}
+    except Exception:  # noqa: BLE001 - caller falls back to local disk
+        return None
+
+
 def render_results(run_dir: Path) -> None:
+    run_name = run_dir.name
     data = read_run_json(run_dir)
     usage = data.get("llm_usage", {})
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Status", data.get("status", "unknown"))
-    col2.metric("Cost", f"${usage.get('cost', 0):.4f}")
-    col3.metric("LLM Requests", usage.get("requests", 0))
-    vulns = data.get("vulnerabilities") or []
-    col4.metric("Vulnerabilities", len(vulns) if isinstance(vulns, list) else "?")
+    # Blob is the source of truth once a run has been archived — falls back
+    # to local disk below when there's no fileurl yet, or the fetch fails.
+    fileurl = get_run_fileurl(run_name)
+    blob_data = fetch_report_from_blob(run_name, load_env_file()) if fileurl else None
 
-    vuln_dir = run_dir / "vulnerabilities"
-    vuln_files = sorted(vuln_dir.glob("*.md")) if vuln_dir.exists() else []
+    if blob_data is not None:
+        vulnerabilities = blob_data["vulnerabilities"]  # {filename: content}
+        report_content = blob_data["report"]
+        sarif_bytes = blob_data["sarif_bytes"]
+    else:
+        vuln_dir = run_dir / "vulnerabilities"
+        vulnerabilities = {
+            vf.name: vf.read_text(errors="replace")
+            for vf in (sorted(vuln_dir.glob("*.md")) if vuln_dir.exists() else [])
+        }
+        report_path = run_dir / "penetration_test_report.md"
+        report_content = report_path.read_text(errors="replace") if report_path.exists() else None
+        sarif_path = run_dir / "findings.sarif"
+        sarif_bytes = sarif_path.read_bytes() if sarif_path.exists() else None
+
+    # Metrics: local run.json when it's there (fresh scan, same host); fall
+    # back to the DB-cached row (kept live by sync_run_status) otherwise —
+    # e.g. viewing a run on a host that never had its local files.
+    if data:
+        status = data.get("status", "unknown")
+        cost = usage.get("cost", 0)
+        requests: object = usage.get("requests", 0)
+    else:
+        db_row = get_run_row(run_name) or {}
+        status = db_row.get("status") or "unknown"
+        cost = db_row.get("cost") or 0
+        requests = "—"
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Status", status)
+    col2.metric("Cost", f"${cost:.4f}")
+    col3.metric("LLM Requests", requests)
+    col4.metric("Vulnerabilities", len(vulnerabilities))
+
+    # Severity data lives in the local vulnerabilities.json (run_dir) — a
+    # blob-fetched run without local files just falls back to "info" per
+    # filename, same as any other missing-metadata case.
+    severities = _load_vuln_severities(run_dir)
+    filenames = sorted(
+        vulnerabilities,
+        key=lambda fn: _SEVERITY_ORDER.get(severities.get(Path(fn).stem, "info"), 5),
+    )
 
     st.divider()
 
-    if vuln_files:
-        st.subheader(f"{len(vuln_files)} vulnerability report(s)")
-        for vf in vuln_files:
-            content = dedupe_repeated_headings(vf.read_text(errors="replace"))
-            first_line = content.splitlines()[0] if content else vf.stem
-            title = first_line.lstrip("#").strip() or vf.stem
+    if vulnerabilities:
+        st.subheader(f"{len(vulnerabilities)} vulnerability report(s)")
+        for filename in filenames:
+            content = dedupe_repeated_headings(vulnerabilities[filename])
+            first_line = content.splitlines()[0] if content else filename
+            title = first_line.lstrip("#").strip() or filename
+            render_severity_badge(severities.get(Path(filename).stem, "info"))
             with st.expander(title, expanded=True):
                 st.markdown(content)
     else:
         st.success("No vulnerabilities reported")
 
-    report_path = run_dir / "penetration_test_report.md"
-    if report_path.exists():
+    st.divider()
+    with st.expander("Attack trace — every tool call the agent made", expanded=False):
+        if not render_attack_trace(run_dir, max_events=500, height_px=480):
+            st.caption("No tool trace recorded for this run.")
+
+    if report_content:
         st.divider()
         st.subheader("Full penetration test report")
-        st.markdown(dedupe_repeated_headings(report_path.read_text(errors="replace")))
+        st.markdown(dedupe_repeated_headings(report_content))
 
-    sarif_path = run_dir / "findings.sarif"
-    if sarif_path.exists():
+    if sarif_bytes:
         st.download_button(
             "Download SARIF",
-            data=sarif_path.read_bytes(),
+            data=sarif_bytes,
             file_name="findings.sarif",
             mime="application/json",
-            key=f"sarif_{run_dir.name}",
+            key=f"sarif_{run_name}",
         )
 
-    st.info(f"Ask questions about this run in the **Chat** tab — it's preselected for `{run_dir.name}`.")
-    st.session_state.chat_run_choice = run_dir.name
+    st.info(f"Ask questions about this run in the **Chat** tab — it's preselected for `{run_name}`.")
+    st.session_state.chat_run_choice = run_name
 
 
 def _esc(value: object) -> str:
@@ -989,6 +1213,42 @@ def _flatten_html(raw: str) -> str:
     spaces as a literal code block, so pretty-printed multi-line HTML gets
     displayed as raw text instead of rendered — flattening avoids that."""
     return " ".join(line.strip() for line in raw.strip().splitlines())
+
+
+def _load_vuln_severities(run_dir: Path) -> dict[str, str]:
+    """{finding id -> lowercased severity} from vulnerabilities.json.
+
+    Empty dict if the file is missing or unreadable — callers should treat a
+    missing entry as "info" (lowest-priority), not fail.
+    """
+    path = run_dir / "vulnerabilities.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(errors="replace"))
+    except json.JSONDecodeError:
+        return {}
+    items = data if isinstance(data, list) else data.get("vulnerabilities", [])
+    return {
+        str(item["id"]): str(item.get("severity", "info")).lower()
+        for item in items
+        if isinstance(item, dict) and item.get("id")
+    }
+
+
+def render_severity_badge(severity: str) -> None:
+    """A small colored dot + label above a finding's expander — expanders
+    can't render HTML in their own label, so this renders just above one."""
+    color = _SEVERITY_COLORS.get(severity, STEEL)
+    label = severity.upper() if severity else "INFO"
+    style = (
+        "display:inline-flex; align-items:center; gap:6px; "
+        "font-family:'IBM Plex Mono',monospace; font-size:11px; font-weight:700; "
+        f"letter-spacing:0.06em; color:{color}; margin:2px 0 4px;"
+    )
+    dot_style = f"width:7px; height:7px; border-radius:50%; background:{color};"
+    badge_html = f'<span style="{style}"><span style="{dot_style}"></span>{_esc(label)}</span>'
+    st.markdown(_flatten_html(badge_html), unsafe_allow_html=True)
 
 
 def render_stat_cards(cards: list[tuple[str, str, str]]) -> None:
@@ -1013,6 +1273,136 @@ def render_stat_cards(cards: list[tuple[str, str, str]]) -> None:
         ),
         unsafe_allow_html=True,
     )
+
+
+def _load_tool_trace_rows(run_dir: Path, *, max_events: int) -> list[dict]:
+    """Read tool_trace.jsonl (strix/core/tool_trace.py) and pair tool_start/tool_end
+    events by their SDK-native tool_call_id. Returns the most recent ``max_events``
+    rows, oldest first — each a dict with start/end (either may be None)."""
+    trace_path = run_dir / "tool_trace.jsonl"
+    if not trace_path.exists():
+        return []
+    starts: dict[str, dict] = {}
+    rows: list[dict] = []
+    for line in trace_path.read_text(errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        call_id = event.get("tool_call_id")
+        if event.get("event") == "tool_start":
+            if call_id:
+                starts[call_id] = event
+            else:
+                rows.append({"start": event, "end": None})
+        elif event.get("event") == "tool_end":
+            start = starts.pop(call_id, None) if call_id else None
+            rows.append({"start": start, "end": event})
+    # Anything still in `starts` is a call that hasn't returned yet — still running.
+    rows.extend({"start": start, "end": None} for start in starts.values())
+    rows.sort(key=lambda r: (r["end"] or r["start"] or {}).get("timestamp", ""))
+    return rows[-max_events:] if max_events else rows
+
+
+def render_attack_trace(run_dir: Path, *, max_events: int = 60, height_px: int = 360) -> bool:
+    """Live/finished attack trace — what the agent actually did, tool by tool.
+
+    Runtime ground truth (strix/core/tool_trace.py's on_tool_start/on_tool_end
+    events), not the agent's own narration — so the operator watching sees the
+    real tool calls as they happen, not just a status spinner. Returns whether
+    anything was rendered, so callers can show a fallback caption otherwise.
+    """
+    rows = _load_tool_trace_rows(run_dir, max_events=max_events)
+    if not rows:
+        return False
+
+    entries = []
+    for row in rows:
+        base = row["end"] or row["start"] or {}
+        agent_id = base.get("agent_id") or "unknown"
+        tool_name = base.get("tool_name", "unknown")
+        timestamp = base.get("timestamp", "")
+        time_label = timestamp.split("T")[-1][:8] if "T" in timestamp else timestamp
+
+        if row["end"] is None:
+            dot_color, status_label = "var(--amber)", "running…"
+            detail = ""
+        else:
+            dot_color, status_label = "var(--green)", "done"
+            detail = str(row["end"].get("result", ""))
+            preview_limit = 220
+            if len(detail) > preview_limit:
+                detail = detail[:preview_limit] + "…"
+
+        args_preview = ""
+        if row["start"] is not None:
+            args = row["start"].get("arguments")
+            if args is not None:
+                args_preview = json.dumps(args, ensure_ascii=False)
+                args_limit = 160
+                if len(args_preview) > args_limit:
+                    args_preview = args_preview[:args_limit] + "…"
+
+        args_style = (
+            "font-family:'IBM Plex Mono',monospace; font-size:11.5px; "
+            "color:var(--faint); margin-top:2px; word-break:break-word;"
+        )
+        detail_style = (
+            "font-family:'IBM Plex Sans',sans-serif; font-size:12px; "
+            "color:var(--mist); margin-top:3px; word-break:break-word;"
+        )
+        args_html = f'<div style="{args_style}">{_esc(args_preview)}</div>' if args_preview else ""
+        detail_html = f'<div style="{detail_style}">{_esc(detail)}</div>' if detail else ""
+
+        time_style = "font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--faint);"
+        agent_style = (
+            "font-family:'IBM Plex Sans',sans-serif; font-size:12px; "
+            "font-weight:600; color:var(--steel);"
+        )
+        tool_style = (
+            "font-family:'IBM Plex Mono',monospace; font-size:12.5px; color:var(--blue-bright);"
+        )
+        status_style = (
+            "font-family:'IBM Plex Sans',sans-serif; font-size:11px; "
+            "color:var(--faint); margin-left:auto;"
+        )
+        row_style = (
+            "display:flex; gap:10px; padding:9px 4px; border-bottom:1px solid var(--hairline);"
+        )
+        entries.append(
+            f"""
+            <div style="{row_style}">
+              <div style="flex:none; width:8px; height:8px; margin-top:6px; border-radius:50%;
+                   background:{dot_color};"></div>
+              <div style="flex:1; min-width:0;">
+                <div style="display:flex; gap:8px; align-items:baseline; flex-wrap:wrap;">
+                  <span style="{time_style}">{_esc(time_label)}</span>
+                  <span style="{agent_style}">{_esc(agent_id)}</span>
+                  <span style="{tool_style}">{_esc(tool_name)}</span>
+                  <span style="{status_style}">{_esc(status_label)}</span>
+                </div>
+                {args_html}
+                {detail_html}
+              </div>
+            </div>
+            """
+        )
+
+    st.markdown(
+        _flatten_html(
+            f"""
+            <div style="background:var(--ink-raised); border:1px solid var(--hairline);
+                 border-radius:10px; padding:6px 12px; max-height:{height_px}px; overflow-y:auto;">
+              {"".join(entries)}
+            </div>
+            """
+        ),
+        unsafe_allow_html=True,
+    )
+    return True
 
 
 def render_gradient_bars(
@@ -1073,17 +1463,15 @@ def render_overview(user_id: int) -> None:
     total_vulns = sum(r["vulnerability_count"] for r in runs)
     total_cost = sum(r["cost"] for r in runs)
     completed = sum(1 for r in runs if r["status"] == "completed")
+    completed_vulns = sum(r["vulnerability_count"] for r in runs if r["status"] == "completed")
+    avg_vulns_display = f"{(completed_vulns / completed):.1f}" if completed else "—"
 
     render_stat_cards(
         [
             ("TOTAL SCANS RUN", str(total_scans), f"{completed} completed"),
             ("TOTAL VULNERABILITIES", str(total_vulns), "found across all scans"),
             ("TOTAL SPEND", f"${total_cost:.4f}", "across all scans"),
-            (
-                "AVG VULNS / SCAN",
-                f"{(total_vulns / total_scans):.1f}",
-                "per completed scan",
-            ),
+            ("AVG VULNS / SCAN", avg_vulns_display, "per completed scan"),
         ]
     )
 
@@ -1123,6 +1511,68 @@ def render_overview(user_id: int) -> None:
     st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
 
 
+BRIEFING_DIR = REPO_DIR / "briefings"
+
+
+def _generate_combined_briefing() -> Path | None:
+    """Run the InjecAgent + AgentDojo briefing pipeline (same steps as
+    docs/run_briefed_scan.sh) and return the combined instruction file path,
+    or None if it couldn't be produced (an st.error/warning is already shown).
+
+    AgentDojo is optional (needs `uv sync --group agentdojo-tools`) — if its
+    generator isn't available, this continues with InjecAgent alone rather
+    than blocking the scan entirely.
+    """
+    BRIEFING_DIR.mkdir(parents=True, exist_ok=True)
+    agentdojo_json = BRIEFING_DIR / "agentdojo_briefing.json"
+    injecagent_json = BRIEFING_DIR / "injecagent_briefing.json"
+    combined_md = BRIEFING_DIR / "combined_briefing.md"
+
+    briefings: list[Path] = []
+
+    agentdojo_script = "docs/agentdojo/agentdojo_to_briefing.py"
+    agentdojo_result = subprocess.run(
+        ["uv", "run", "python", agentdojo_script, "--out", str(agentdojo_json)],
+        cwd=str(REPO_DIR),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if agentdojo_result.returncode == 0:
+        briefings.append(agentdojo_json)
+    else:
+        st.warning(
+            "AgentDojo briefing unavailable (optional dependency not installed — "
+            "run `uv sync --group agentdojo-tools` to enable it). "
+            "Continuing with InjecAgent only."
+        )
+
+    injecagent_script = "docs/injecagent/injecagent_to_briefing.py"
+    injecagent_result = subprocess.run(
+        ["uv", "run", "python", injecagent_script, "--out", str(injecagent_json)],
+        cwd=str(REPO_DIR),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if injecagent_result.returncode != 0:
+        st.error(f"InjecAgent briefing generation failed:\n{injecagent_result.stderr[-500:]}")
+        return None
+    briefings.append(injecagent_json)
+
+    merge_cmd = ["uv", "run", "python", "docs/merge_briefings.py", "--out", str(combined_md)]
+    for briefing_path in briefings:
+        merge_cmd += ["--briefing", str(briefing_path)]
+    merge_result = subprocess.run(
+        merge_cmd, cwd=str(REPO_DIR), capture_output=True, text=True, check=False
+    )
+    if merge_result.returncode != 0:
+        st.error(f"Briefing merge failed:\n{merge_result.stderr[-500:]}")
+        return None
+
+    return combined_md
+
+
 def render_new_scan_tab() -> None:
     for key, default in (
         ("process", None),
@@ -1139,11 +1589,16 @@ def render_new_scan_tab() -> None:
             "Application URL",
             placeholder="https://your-app.example.com",
             disabled=scanning,
+            key="scan_target_url",
         )
         col1, col2 = st.columns(2)
         with col1:
             scan_mode = st.selectbox(
-                "Scan mode", ["quick", "standard", "deep"], index=0, disabled=scanning
+                "Scan mode",
+                ["quick", "standard", "deep"],
+                index=0,
+                disabled=scanning,
+                key="scan_mode_select",
             )
         with col2:
             max_budget = st.number_input(
@@ -1153,7 +1608,19 @@ def render_new_scan_tab() -> None:
                 value=2.0,
                 step=0.5,
                 disabled=scanning,
+                key="scan_max_budget",
             )
+        use_briefing = st.checkbox(
+            "Use AgentDojo + InjecAgent attack briefing",
+            value=True,
+            disabled=scanning,
+            help=(
+                "Steers the scan toward tool-calling / indirect-prompt-injection testing "
+                "(AgentDojo's delivery templates + InjecAgent's attacker-goal taxonomy) "
+                "instead of generic web recon. Recommended for AI-agent targets; uncheck "
+                "for a plain scan of an ordinary web app."
+            ),
+        )
         authorized = st.checkbox(
             "I own this application or have explicit authorization to test it "
             "(findings are actively exploited, not just flagged)",
@@ -1168,40 +1635,51 @@ def render_new_scan_tab() -> None:
             st.error("Confirm authorization before scanning a target.")
         else:
             env = load_env_file()
-            if not env.get("LLM_API_KEY"):
+            if not _resolve_llm_api_key(env):
                 st.error("No LLM API key configured. Set it up before scanning.")
             else:
-                LOG_DIR.mkdir(parents=True, exist_ok=True)
-                log_file = LOG_DIR / f"scan-{int(time.time())}-{os.getpid()}.log"
-                log_handle = open(log_file, "w")
-                cmd = [
-                    "uv",
-                    "run",
-                    "strix",
-                    "--target",
-                    target_url.strip(),
-                    "-n",
-                    "-m",
-                    scan_mode,
-                    "--max-budget",
-                    str(max_budget),
-                    # Bound wall-clock time independent of budget — a cheap model can
-                    # buy far more than this many turns within max_budget alone.
-                    "--max-turns",
-                    "20",
-                ]
-                proc = subprocess.Popen(
-                    cmd,
-                    cwd=str(REPO_DIR),
-                    env=env,
-                    stdout=log_handle,
-                    stderr=subprocess.STDOUT,
-                )
-                st.session_state.process = proc
-                st.session_state.start_time = time.time()
-                st.session_state.log_path = str(log_file)
-                st.session_state.run_dir = None
-                st.rerun()
+                instruction_file: Path | None = None
+                briefing_ok = True
+                if use_briefing:
+                    with st.spinner("Generating InjecAgent + AgentDojo briefing…"):
+                        instruction_file = _generate_combined_briefing()
+                    briefing_ok = instruction_file is not None
+
+                if briefing_ok:
+                    LOG_DIR.mkdir(parents=True, exist_ok=True)
+                    log_file = LOG_DIR / f"scan-{int(time.time())}-{os.getpid()}.log"
+                    log_handle = open(log_file, "w")
+                    cmd = [
+                        "uv",
+                        "run",
+                        "strix",
+                        "--target",
+                        target_url.strip(),
+                        "-n",
+                        "-m",
+                        scan_mode,
+                        "--max-budget",
+                        str(max_budget),
+                        # Bound wall-clock time independent of budget — a cheap model can
+                        # buy far more than this many turns within max_budget alone.
+                        "--max-turns",
+                        "20",
+                    ]
+                    if instruction_file is not None:
+                        cmd += ["--instruction-file", str(instruction_file)]
+                    proc = subprocess.Popen(
+                        cmd,
+                        cwd=str(REPO_DIR),
+                        env=env,
+                        stdout=log_handle,
+                        stderr=subprocess.STDOUT,
+                    )
+                    st.session_state.process = proc
+                    st.session_state.start_time = time.time()
+                    st.session_state.log_path = str(log_file)
+                    st.session_state.run_dir = None
+                    st.session_state.launched_max_budget = max_budget
+                    st.rerun()
 
     if st.session_state.process is not None:
         proc: subprocess.Popen = st.session_state.process
@@ -1217,10 +1695,16 @@ def render_new_scan_tab() -> None:
         if st.session_state.run_dir:
             data = read_run_json(Path(st.session_state.run_dir))
             usage = data.get("llm_usage", {})
+            displayed_budget = st.session_state.get("launched_max_budget", max_budget)
             col1, col2, col3 = st.columns(3)
             col1.metric("Status", data.get("status", "starting"))
-            col2.metric("Cost", f"${usage.get('cost', 0):.4f} / ${max_budget:.2f}")
+            col2.metric("Cost", f"${usage.get('cost', 0):.4f} / ${displayed_budget:.2f}")
             col3.metric("Requests", usage.get("requests", 0))
+
+        if st.session_state.run_dir:
+            st.markdown("**Attack trace** — what the agent is actually doing, live")
+            if not render_attack_trace(Path(st.session_state.run_dir)):
+                st.caption("No tool calls recorded yet…")
 
         with st.expander("Live log tail", expanded=False):
             log_path = Path(st.session_state.log_path)
@@ -1237,6 +1721,13 @@ def render_new_scan_tab() -> None:
             time.sleep(2)
             st.rerun()
         else:
+            if st.session_state.run_dir:
+                finished_run_dir = Path(st.session_state.run_dir)
+                fileurl = upload_report_to_blob(
+                    finished_run_dir, finished_run_dir.name, load_env_file()
+                )
+                if fileurl:
+                    set_run_fileurl(finished_run_dir.name, fileurl)
             st.session_state.process = None
             st.rerun()
 

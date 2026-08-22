@@ -41,6 +41,7 @@ from strix.core.inputs import (
 )
 from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.core.sessions import open_agent_session
+from strix.core.tool_trace import TOOL_TRACE_FILENAME
 from strix.report.state import get_global_report_state
 from strix.runtime import session_manager
 from strix.telemetry.logging import set_scan_id, setup_scan_logging
@@ -283,6 +284,8 @@ async def run_strix_scan(
             max_budget_usd=max_budget_usd,
             max_turns=max_turns,
             interactive=interactive,
+            trace_path=run_dir / TOOL_TRACE_FILENAME,
+            run_id=scan_id,
         )
         if interactive:
             coordinator.set_budget_extender(hooks.extend_budget)

@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 
 def _make_run(base: Path, name: str = "sample") -> Path:
-    run_dir = base / "strix_runs" / name
+    run_dir = base / "meerkatx" / name
     run_dir.mkdir(parents=True)
     record = {
         "run_name": name,

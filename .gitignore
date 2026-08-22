@@ -75,7 +75,7 @@ logs/
 tensorboard/
 
 # Agent execution traces
-strix_runs/
+meerkatx/
 agent_runs/
 
 # Generated briefing outputs (docs/run_briefed_scan.sh)
@@ -101,3 +101,4 @@ schema.graphql
 /.benchmarks/
 /references/
 /strix_runs_main/
+/strix_runs/

@@ -8,10 +8,13 @@ from typing import TYPE_CHECKING, Any
 
 from agents.lifecycle import RunHooks
 
+from strix.core.tool_trace import ToolTraceWriter
 from strix.report.state import get_global_report_state
 
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from agents import RunContextWrapper
     from agents.agent import Agent
     from agents.items import ModelResponse, TResponseInputItem
@@ -111,6 +114,22 @@ def _urgency(stage: int) -> str:
     return _STAGE_LABELS[stage]
 
 
+def _resolve_tool_name(context: RunContextWrapper[dict[str, Any]], tool: Any) -> str:
+    """Best-effort tool name for a trace event.
+
+    ``context`` is typed generically as ``RunContextWrapper`` here (matching
+    the SDK's ``RunHooks`` signature), but the object actually passed at
+    runtime is a ``ToolContext`` subclass carrying ``tool_name`` — fall back
+    to the static ``Tool`` definition's own ``name`` if that attribute is
+    ever absent (e.g. a future SDK tool kind this wasn't written against).
+    """
+    name = getattr(context, "tool_name", None)
+    if isinstance(name, str) and name:
+        return name
+    fallback = getattr(tool, "name", None)
+    return fallback if isinstance(fallback, str) and fallback else "unknown"
+
+
 class ReportUsageHooks(RunHooks[dict[str, Any]]):
     """Persist SDK-native usage and warn/stop as turn and cost budgets are consumed."""
 
@@ -121,6 +140,8 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
         max_budget_usd: float | None = None,
         max_turns: int | None = None,
         interactive: bool = False,
+        trace_path: Path | None = None,
+        run_id: str = "",
     ) -> None:
         if max_budget_usd is not None and (
             not math.isfinite(max_budget_usd) or max_budget_usd <= 0
@@ -133,11 +154,52 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
         self._budget_increment = max_budget_usd
         self._max_turns = max_turns
         self._interactive = interactive
+        # Runtime ground-truth tool-call trace (Phase 1 of a future
+        # structured attack-case engine — see strix/core/tool_trace.py).
+        # None disables tracing entirely (e.g. tests that don't pass trace_path).
+        self._trace = ToolTraceWriter(trace_path, run_id) if trace_path is not None else None
 
     def extend_budget(self) -> None:
         if self._max_budget_usd is None or self._budget_increment is None:
             return
         self._max_budget_usd += self._budget_increment
+
+    async def on_tool_start(
+        self,
+        context: RunContextWrapper[dict[str, Any]],
+        agent: Agent[dict[str, Any]],  # noqa: ARG002
+        tool: Any,
+    ) -> None:
+        if self._trace is None:
+            return
+        try:
+            await self._trace.record_tool_start(
+                agent_id=context.context.get("agent_id"),
+                tool_name=_resolve_tool_name(context, tool),
+                tool_call_id=getattr(context, "tool_call_id", None),
+                raw_arguments=getattr(context, "tool_arguments", None),
+            )
+        except Exception:
+            logger.exception("tool trace on_tool_start failed (non-fatal)")
+
+    async def on_tool_end(
+        self,
+        context: RunContextWrapper[dict[str, Any]],
+        agent: Agent[dict[str, Any]],  # noqa: ARG002
+        tool: Any,
+        result: object,
+    ) -> None:
+        if self._trace is None:
+            return
+        try:
+            await self._trace.record_tool_end(
+                agent_id=context.context.get("agent_id"),
+                tool_name=_resolve_tool_name(context, tool),
+                tool_call_id=getattr(context, "tool_call_id", None),
+                result=result,
+            )
+        except Exception:
+            logger.exception("tool trace on_tool_end failed (non-fatal)")
 
     async def on_llm_start(
         self,

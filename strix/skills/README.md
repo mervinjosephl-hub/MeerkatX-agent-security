@@ -48,6 +48,7 @@ Notable LLM security skills:
 - `llm_prompt_injection` (vulnerabilities): deep direct, indirect, multimodal, memory, and tool-result prompt-injection testing
 - `agentdojo` (vulnerabilities): AgentDojo-style tool-agent testing — pairs a legitimate user task with a hidden injection task and runs the canonical attack suite (direct, ignore-previous, system-message spoofing, important-instructions, tool-knowledge, chained tool-result redirection) against the target's real tools
 - `injecagent` (vulnerabilities): InjecAgent-style attacker-goal taxonomy — six categories of concrete, checkable injection outcomes (financial/physical/data-security harm; financial/physical/other data-stealing, which requires both extraction and exfiltration) plus the "enhanced" hacking-prompt-reinforcement technique; pairs with `agentdojo`'s delivery templates
+- `agentic_security_coverage` (vulnerabilities): coverage and validation discipline for agent-security testing — the Attack→Signal→Validation→Finding hierarchy, a five-state per-category coverage checklist (CONFIRMED/NOT_VULNERABLE/INCONCLUSIVE/NOT_APPLICABLE/NOT_TESTED), and methodology for Jailbreak, Data Exfiltration (access/disclosure/exfiltration staging), Capability Abuse, and (supplemental) Context Manipulation — categories `agentdojo`/`injecagent` don't cover
 
 ---
 

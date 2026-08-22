@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+import json
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,6 +15,10 @@ from strix.core.hooks import (
     SubagentBudgetReservedError,
     recomputed_budget_flags,
 )
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _make_hooks(max_budget: float | None) -> ReportUsageHooks:
@@ -491,3 +496,106 @@ def test_recomputed_budget_flags(
     expected: tuple[bool, bool],
 ) -> None:
     assert recomputed_budget_flags(cost, max_budget, interactive=interactive) == expected
+
+
+# --- Runtime ground-truth tool-call trace (ReportUsageHooks.on_tool_start/on_tool_end) ---
+
+
+def _make_tool_context(
+    *,
+    agent_id: str = "root",
+    tool_name: str = "search_email",
+    tool_call_id: str = "call-1",
+    tool_arguments: str = "{}",
+) -> MagicMock:
+    """Mimic the real ``ToolContext`` the SDK passes at runtime (a ``RunContextWrapper``
+    subclass carrying ``tool_name``/``tool_call_id``/``tool_arguments`` as attributes —
+    verified against ``agents.tool_context.ToolContext`` in the installed SDK)."""
+    ctx: MagicMock = MagicMock()
+    ctx.context = {"agent_id": agent_id, "parent_id": None}
+    ctx.tool_name = tool_name
+    ctx.tool_call_id = tool_call_id
+    ctx.tool_arguments = tool_arguments
+    return ctx
+
+
+def _read_trace_events(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def test_hooks_without_trace_path_is_a_noop() -> None:
+    """Existing behavior (no tracing) must be unaffected by this feature."""
+    hooks = ReportUsageHooks(model="test-model")  # no trace_path
+    assert hooks._trace is None
+
+
+@pytest.mark.asyncio
+async def test_on_tool_start_writes_trace_event(tmp_path: Path) -> None:
+    trace_path = tmp_path / "tool_trace.jsonl"
+    hooks = ReportUsageHooks(model="test-model", trace_path=trace_path, run_id="run-xyz")
+    await hooks.on_tool_start(
+        _make_tool_context(tool_name="lookup_order", tool_arguments='{"order_id": "42"}'),
+        MagicMock(),
+        MagicMock(name="lookup_order"),
+    )
+    events = _read_trace_events(trace_path)
+    assert len(events) == 1
+    assert events[0]["event"] == "tool_start"
+    assert events[0]["tool_name"] == "lookup_order"
+    assert events[0]["agent_id"] == "root"
+    assert events[0]["run_id"] == "run-xyz"
+    assert events[0]["arguments"] == {"order_id": "42"}
+
+
+@pytest.mark.asyncio
+async def test_on_tool_end_writes_trace_event(tmp_path: Path) -> None:
+    trace_path = tmp_path / "tool_trace.jsonl"
+    hooks = ReportUsageHooks(model="test-model", trace_path=trace_path, run_id="run-xyz")
+    await hooks.on_tool_end(
+        _make_tool_context(tool_name="send_email"),
+        MagicMock(),
+        MagicMock(),
+        "delivery blocked by egress policy",
+    )
+    events = _read_trace_events(trace_path)
+    assert events[0]["event"] == "tool_end"
+    assert events[0]["result"] == "delivery blocked by egress policy"
+
+
+@pytest.mark.asyncio
+async def test_multi_agent_tool_events_retain_agent_identity(tmp_path: Path) -> None:
+    trace_path = tmp_path / "tool_trace.jsonl"
+    hooks = ReportUsageHooks(model="test-model", trace_path=trace_path, run_id="run-xyz")
+    await hooks.on_tool_start(
+        _make_tool_context(agent_id="root", tool_call_id="c1"), MagicMock(), MagicMock()
+    )
+    await hooks.on_tool_start(
+        _make_tool_context(agent_id="child-injecagent", tool_call_id="c2"),
+        MagicMock(),
+        MagicMock(),
+    )
+    events = _read_trace_events(trace_path)
+    assert {e["agent_id"] for e in events} == {"root", "child-injecagent"}
+
+
+@pytest.mark.asyncio
+async def test_tool_hooks_never_raise_even_if_tracing_fails(tmp_path: Path) -> None:
+    """A tracing bug must never break the actual scan — see hooks.py's try/except."""
+    hooks = ReportUsageHooks(
+        model="test-model", trace_path=tmp_path / "tool_trace.jsonl", run_id="run-xyz"
+    )
+    with patch.object(hooks._trace, "record_tool_start", side_effect=RuntimeError("disk full")):
+        await hooks.on_tool_start(_make_tool_context(), MagicMock(), MagicMock())  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_tool_name_falls_back_to_tool_object_when_context_lacks_it(tmp_path: Path) -> None:
+    trace_path = tmp_path / "tool_trace.jsonl"
+    hooks = ReportUsageHooks(model="test-model", trace_path=trace_path, run_id="run-xyz")
+    ctx: MagicMock = MagicMock(spec=["context"])  # no tool_name attribute at all
+    ctx.context = {"agent_id": "root", "parent_id": None}
+    tool = MagicMock()
+    tool.name = "exec_command"
+    await hooks.on_tool_start(ctx, MagicMock(), tool)
+    events = _read_trace_events(trace_path)
+    assert events[0]["tool_name"] == "exec_command"

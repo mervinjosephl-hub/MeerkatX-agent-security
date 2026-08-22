@@ -84,7 +84,7 @@ Key flags:
 | `--instruction` / `--instruction-file` | Credentials, focus areas, scope rules. |
 | `--max-budget USD` | Hard LLM spend cap; scan wraps up cleanly at the limit. |
 | `--max-turns N` | Per-agent turn cap (default 500). |
-| `--resume RUN_NAME` | Resume a prior run from `strix_runs/`. |
+| `--resume RUN_NAME` | Resume a prior run from `meerkatx/`. |
 
 Scans take minutes (`quick`) to hours (`deep`). Run them in the background and poll for completion rather than blocking.
 
@@ -94,11 +94,11 @@ Scans take minutes (`quick`) to hours (`deep`). Run them in the background and p
 - `1` — fatal error (missing env vars, Docker down, bad config)
 - `2` — vulnerabilities found
 
-A `0` is not proof of full coverage: if `--max-budget`/`--max-turns` is reached before the scan completes, it wraps up early and still exits `0`. When you need assurance the scan finished, give it enough budget and check `strix_runs/<run>/run.json`: a hard budget stop leaves `status: "stopped"`, but an agent that wrapped up early on a budget *warning* still calls `finish_scan` and records `"completed"` — so also sanity-check the run's cost against `--max-budget` and the report's stated coverage before treating a clean result as full coverage.
+A `0` is not proof of full coverage: if `--max-budget`/`--max-turns` is reached before the scan completes, it wraps up early and still exits `0`. When you need assurance the scan finished, give it enough budget and check `meerkatx/<run>/run.json`: a hard budget stop leaves `status: "stopped"`, but an agent that wrapped up early on a budget *warning* still calls `finish_scan` and records `"completed"` — so also sanity-check the run's cost against `--max-budget` and the report's stated coverage before treating a clean result as full coverage.
 
 ### Reading results
 
-Artifacts land in `strix_runs/<run-name>/`:
+Artifacts land in `meerkatx/<run-name>/`:
 
 | File | Contents |
 |---|---|

@@ -141,6 +141,36 @@ async def finish_scan(
        chain after a serious attempt is acceptable; skipping the
        chaining reasoning, or ignoring a plausibly-related combination,
        is not.
+    5. **Coverage completeness gate.** If reconnaissance surfaced a
+       target-declared or otherwise identifiable set of security
+       categories to test (e.g. an AI-agent target's self-advertised
+       vulnerability classes, an API's documented auth/authz model, a
+       framework's known risk categories), each one must resolve to
+       exactly one of: ``CONFIRMED`` (filed via
+       ``create_vulnerability_report``), ``NOT_VULNERABLE`` (tested,
+       not exploitable — say what was tried), ``INCONCLUSIVE`` (tested,
+       evidence insufficient either way — say why), ``NOT_APPLICABLE``
+       (doesn't apply to this target — say why), or ``NOT_TESTED`` (say
+       why it wasn't reached — budget, scope, time). Include this
+       breakdown as an explicit table in ``technical_analysis``. Do
+       NOT let ``executive_summary`` imply full coverage when any
+       category is ``NOT_TESTED`` or ``INCONCLUSIVE`` — state the gap
+       plainly. Critically: an attack attempt, a positive-looking
+       response, or a narrative mention is **not** the same thing as
+       ``CONFIRMED`` — a category only reaches ``CONFIRMED`` once a
+       reporting agent has independently validated it and filed it via
+       ``create_vulnerability_report`` (or ``create_dependency_report``
+       for a dependency CVE). Observing a promising signal during
+       triage and moving on without validating and filing it is
+       exactly the failure this gate exists to catch — do not stop
+       working through the categories just because one has already
+       produced a critical finding. Where multiple attack variants
+       (e.g. different injection templates) demonstrate the same
+       underlying vulnerability, that is one finding with several
+       supporting attack traces as evidence — not one report per
+       variant (``create_vulnerability_report``'s own deduplication
+       also catches true duplicates, but don't rely on it as a
+       substitute for this judgment).
 
     **Calling this multiple times overwrites the previous report.**
     Make the single call comprehensive.

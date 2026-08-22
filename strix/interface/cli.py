@@ -14,6 +14,7 @@ from rich.text import Text
 
 from strix.config import load_settings
 from strix.config.settings import DEFAULT_MAX_TURNS
+from strix.core.paths import RUNS_DIR_NAME
 from strix.core.runner import run_strix_scan
 from strix.report.state import ReportState, set_global_report_state
 from strix.runtime import session_manager
@@ -58,7 +59,7 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
     results_text = Text()
     results_text.append("Output", style="dim")
     results_text.append("  ")
-    results_text.append(f"strix_runs/{args.run_name}", style="#60a5fa")
+    results_text.append(f"{RUNS_DIR_NAME}/{args.run_name}", style="#60a5fa")
 
     note_text = Text()
     note_text.append("\n\n", style="dim")
@@ -73,7 +74,7 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
             results_text,
             note_text,
         ),
-        title="[bold white]STRIX",
+        title="[bold white]MEERKATX",
         title_align="left",
         border_style="#22c55e",
         padding=(1, 2),
@@ -155,7 +156,7 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
 
         return Panel(
             status_text,
-            title="[bold white]STRIX",
+            title="[bold white]MEERKATX",
             title_align="left",
             border_style="#22c55e",
             padding=(1, 2),
@@ -223,7 +224,7 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
                 "\n\n",
                 report_state.final_scan_result,
             ),
-            title="[bold white]STRIX",
+            title="[bold white]MEERKATX",
             title_align="left",
             border_style="#60a5fa",
             padding=(1, 2),

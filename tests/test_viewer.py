@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 
 def _make_run(base: Path, name: str, *, status: str, end_time: str | None) -> Path:
-    run_dir = base / "strix_runs" / name
+    run_dir = base / "meerkatx" / name
     state_dir = run_dir / ".state"
     state_dir.mkdir(parents=True)
     record = {"run_name": name, "status": status, "end_time": end_time}
@@ -45,7 +45,7 @@ def _make_run(base: Path, name: str, *, status: str, end_time: str | None) -> Pa
 def test_latest_run_dir_none_when_no_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     assert latest_run_dir() is None
-    assert runs_base_dir() == tmp_path / "strix_runs"
+    assert runs_base_dir() == tmp_path / "meerkatx"
 
 
 def test_latest_run_dir_picks_newest_by_record_mtime(
