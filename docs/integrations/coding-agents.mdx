@@ -39,7 +39,7 @@ Everything an agent needs is machine-readable:
 
 - **Headless CLI** — `strix -n` runs without the TUI and exits with `0` (clean), `1` (error), or `2` (vulnerabilities found).
 - **REST API** — the managed platform exposes a documented [OpenAPI](https://docs.app.strix.ai/openapi.json) at `https://app.strix.ai/api/v1` (scans, vulnerabilities, assets, PR reviews, schedules, webhooks) with bearer tokens and scopes.
-- **Structured results** — every run writes `vulnerabilities.json`, `vulnerabilities.csv`, `findings.sarif` (SARIF 2.1.0), and per-finding Markdown under `strix_runs/<run-name>/`; the cloud exposes the same as JSON plus SARIF export.
+- **Structured results** — every run writes `vulnerabilities.json`, `vulnerabilities.csv`, `findings.sarif` (SARIF 2.1.0), and per-finding Markdown under `meerkatx/<run-name>/`; the cloud exposes the same as JSON plus SARIF export.
 - **Budget controls** — `--max-budget` and `--max-turns` give agents hard cost/time caps.
 - **`AGENTS.md`** — the [repository's agent guide](https://github.com/usestrix/strix/blob/main/AGENTS.md) with a quick reference.
 - **`llms.txt`** — this documentation is indexed at [docs.strix.ai/llms.txt](https://docs.strix.ai/llms.txt) and fully exported at [docs.strix.ai/llms-full.txt](https://docs.strix.ai/llms-full.txt); every page is also available as Markdown by appending `.md` to its URL.

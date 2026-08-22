@@ -275,7 +275,7 @@ def _fail(console: Console, exc: codex.CodexAuthError) -> int:
     console.print(
         Panel(
             error_text,
-            title="[bold white]STRIX",
+            title="[bold white]MEERKATX",
             title_align="left",
             border_style="red",
             padding=(1, 2),
@@ -302,7 +302,7 @@ def _print_success(console: Console) -> None:
     console.print(
         Panel(
             text,
-            title="[bold white]STRIX",
+            title="[bold white]MEERKATX",
             title_align="left",
             border_style="#22c55e",
             padding=(1, 2),

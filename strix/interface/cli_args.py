@@ -8,7 +8,7 @@ from pathlib import Path
 
 from strix.config import apply_config_override
 from strix.config.settings import DEFAULT_MAX_TURNS
-from strix.core.paths import run_dir_for, runtime_state_dir
+from strix.core.paths import RUNS_DIR_NAME, run_dir_for, runtime_state_dir
 from strix.interface.scan_setup import attach_workspace_mount, build_targets_info
 from strix.interface.update_check import self_update
 from strix.interface.utils import (
@@ -249,7 +249,7 @@ Examples:
         type=str,
         metavar="RUN_NAME",
         help=(
-            "Resume a prior scan by its run name (the dir under ./strix_runs/). "
+            f"Resume a prior scan by its run name (the dir under ./{RUNS_DIR_NAME}/). "
             "Picks up the root + every non-terminal subagent's full LLM history "
             "and agent topology. Skips fresh run-name generation."
         ),

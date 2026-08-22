@@ -1,10 +1,15 @@
 """MeerkatX — Streamlit UI for running scans and viewing results.
 
 Run with:
-    uv run --with streamlit --with certifi streamlit run streamlit_ui/app.py
+    uv run --with streamlit --with certifi --with azure-storage-blob streamlit run streamlit_ui/app.py
 
 Requires the Strix repo's own environment to already be set up (uv sync)
 and a .env file at the repo root with STRIX_LLM / LLM_API_KEY / LLM_API_BASE.
+
+Optional: AZURE_STORAGE_CONNECTION_STRING in .env archives each completed
+scan's report to a private "reports" blob container, keyed by run name, and
+the History tab reads back from there instead of local disk. Without it, the
+app works exactly as before — reports stay local-disk only.
 
 Login state lives in Streamlit's session_state, which is per-browser-tab and
 reset on a full page reload — this is a lightweight session-based auth
@@ -16,6 +21,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import html
+import io
 import json
 import os
 import re
@@ -26,11 +32,13 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
 import certifi
 import streamlit as st
+from azure.storage.blob import BlobServiceClient
 
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(\S.*?)\s*$")
@@ -201,7 +209,7 @@ def render_watch_line(count: int = 27, up_every: int = 6) -> str:
 
 
 REPO_DIR = Path(__file__).resolve().parent.parent
-RUNS_DIR = REPO_DIR / "strix_runs"
+RUNS_DIR = REPO_DIR / "meerkatx"
 ENV_FILE = REPO_DIR / ".env"
 LOG_DIR = REPO_DIR / "streamlit_ui" / "logs"
 DB_PATH = REPO_DIR / "streamlit_ui" / "users.db"
@@ -270,6 +278,7 @@ def init_db() -> None:
             ("cost", "REAL"),
             ("vulnerability_count", "INTEGER"),
             ("updated_at", "TEXT"),
+            ("fileurl", "TEXT"),
         ):
             try:
                 conn.execute(f"ALTER TABLE scan_runs ADD COLUMN {column} {coltype}")
@@ -326,6 +335,51 @@ def sync_run_status(run_dir: Path, run_json: dict) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def set_run_fileurl(run_name: str, fileurl: str) -> None:
+    """Record the blob URL a run's report archive was uploaded to."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            "UPDATE scan_runs SET fileurl = ? WHERE run_name = ?",
+            (fileurl, run_name),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_run_fileurl(run_name: str) -> str | None:
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT fileurl FROM scan_runs WHERE run_name = ?", (run_name,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return row[0] if row and row[0] else None
+
+
+def get_run_row(run_name: str) -> dict | None:
+    """DB-cached {status, cost, vulnerability_count} for one run.
+
+    Fallback for render_results() when local run.json isn't available
+    (e.g. viewing a run on a host where local meerkatx/ never had it, or
+    it was cleaned up) — the DB is kept in sync by sync_run_status().
+    """
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT status, cost, vulnerability_count FROM scan_runs WHERE run_name = ?",
+            (run_name,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    status, cost, vuln_count = row
+    return {"status": status, "cost": cost, "vulnerability_count": vuln_count}
 
 
 def get_user_runs_metadata(user_id: int) -> dict[str, dict]:
@@ -932,51 +986,177 @@ def read_run_json(run_dir: Path) -> dict:
     return data
 
 
+# --------------------------------------------------------------------------
+# Blob storage archival — optional. Reports are zipped and uploaded to a
+# private "reports" container keyed by run name, so they survive past local
+# disk (e.g. a redeploy on ephemeral hosting). Every function here degrades
+# to a no-op / None on missing config or any Azure error — archival must
+# never be able to hide that a scan itself succeeded.
+# --------------------------------------------------------------------------
+
+AZURE_CONTAINER_NAME = "reports"
+
+
+def _get_blob_service_client(env: dict[str, str]) -> BlobServiceClient | None:
+    conn_str = env.get("AZURE_STORAGE_CONNECTION_STRING", "").strip()
+    if not conn_str:
+        return None
+    try:
+        return BlobServiceClient.from_connection_string(conn_str)
+    except Exception:  # noqa: BLE001 - archival is best-effort, never fatal
+        return None
+
+
+def build_report_zip_bytes(run_dir: Path) -> bytes | None:
+    """Zip penetration_test_report.md + vulnerabilities/*.md + findings.sarif.
+
+    Only these three sources — never run.json, strix.log, .state/, or the
+    vulnerabilities.csv/.json siblings, which can carry internal/debug detail.
+    Returns None if none of them exist yet (nothing to archive).
+    """
+    buf = io.BytesIO()
+    wrote_anything = False
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        report_path = run_dir / "penetration_test_report.md"
+        if report_path.exists():
+            zf.writestr("penetration_test_report.md", report_path.read_bytes())
+            wrote_anything = True
+
+        vuln_dir = run_dir / "vulnerabilities"
+        if vuln_dir.exists():
+            for vf in sorted(vuln_dir.glob("*.md")):
+                zf.writestr(f"vulnerabilities/{vf.name}", vf.read_bytes())
+                wrote_anything = True
+
+        sarif_path = run_dir / "findings.sarif"
+        if sarif_path.exists():
+            zf.writestr("findings.sarif", sarif_path.read_bytes())
+            wrote_anything = True
+
+    return buf.getvalue() if wrote_anything else None
+
+
+def upload_report_to_blob(run_dir: Path, run_name: str, env: dict[str, str]) -> str | None:
+    client = _get_blob_service_client(env)
+    if client is None:
+        return None
+    zip_bytes = build_report_zip_bytes(run_dir)
+    if zip_bytes is None:
+        return None
+    try:
+        container = client.get_container_client(AZURE_CONTAINER_NAME)
+        try:
+            container.create_container()
+        except Exception:  # noqa: BLE001 - fine if it already exists
+            pass
+        blob_client = container.upload_blob(
+            name=f"{run_name}.zip", data=zip_bytes, overwrite=True
+        )
+        return blob_client.url
+    except Exception as e:  # noqa: BLE001 - archival is best-effort, never fatal
+        st.warning(f"Report archival to Azure Blob failed (scan result is unaffected): {e}")
+        return None
+
+
+def fetch_report_from_blob(run_name: str, env: dict[str, str]) -> dict | None:
+    """Download and unpack <run_name>.zip. Returns None on any failure."""
+    client = _get_blob_service_client(env)
+    if client is None:
+        return None
+    try:
+        container = client.get_container_client(AZURE_CONTAINER_NAME)
+        data = container.download_blob(f"{run_name}.zip").readall()
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            names = zf.namelist()
+            report = (
+                zf.read("penetration_test_report.md").decode(errors="replace")
+                if "penetration_test_report.md" in names
+                else None
+            )
+            vulnerabilities = {
+                Path(name).name: zf.read(name).decode(errors="replace")
+                for name in names
+                if name.startswith("vulnerabilities/") and name.endswith(".md")
+            }
+            sarif_bytes = zf.read("findings.sarif") if "findings.sarif" in names else None
+        return {"report": report, "vulnerabilities": vulnerabilities, "sarif_bytes": sarif_bytes}
+    except Exception:  # noqa: BLE001 - caller falls back to local disk
+        return None
+
+
 def render_results(run_dir: Path) -> None:
+    run_name = run_dir.name
     data = read_run_json(run_dir)
     usage = data.get("llm_usage", {})
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Status", data.get("status", "unknown"))
-    col2.metric("Cost", f"${usage.get('cost', 0):.4f}")
-    col3.metric("LLM Requests", usage.get("requests", 0))
-    vulns = data.get("vulnerabilities") or []
-    col4.metric("Vulnerabilities", len(vulns) if isinstance(vulns, list) else "?")
+    # Blob is the source of truth once a run has been archived — falls back
+    # to local disk below when there's no fileurl yet, or the fetch fails.
+    fileurl = get_run_fileurl(run_name)
+    blob_data = fetch_report_from_blob(run_name, load_env_file()) if fileurl else None
 
-    vuln_dir = run_dir / "vulnerabilities"
-    vuln_files = sorted(vuln_dir.glob("*.md")) if vuln_dir.exists() else []
+    if blob_data is not None:
+        vulnerabilities = blob_data["vulnerabilities"]  # {filename: content}
+        report_content = blob_data["report"]
+        sarif_bytes = blob_data["sarif_bytes"]
+    else:
+        vuln_dir = run_dir / "vulnerabilities"
+        vulnerabilities = {
+            vf.name: vf.read_text(errors="replace")
+            for vf in (sorted(vuln_dir.glob("*.md")) if vuln_dir.exists() else [])
+        }
+        report_path = run_dir / "penetration_test_report.md"
+        report_content = report_path.read_text(errors="replace") if report_path.exists() else None
+        sarif_path = run_dir / "findings.sarif"
+        sarif_bytes = sarif_path.read_bytes() if sarif_path.exists() else None
+
+    # Metrics: local run.json when it's there (fresh scan, same host); fall
+    # back to the DB-cached row (kept live by sync_run_status) otherwise —
+    # e.g. viewing a run on a host that never had its local files.
+    if data:
+        status = data.get("status", "unknown")
+        cost = usage.get("cost", 0)
+        requests: object = usage.get("requests", 0)
+    else:
+        db_row = get_run_row(run_name) or {}
+        status = db_row.get("status") or "unknown"
+        cost = db_row.get("cost") or 0
+        requests = "—"
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Status", status)
+    col2.metric("Cost", f"${cost:.4f}")
+    col3.metric("LLM Requests", requests)
+    col4.metric("Vulnerabilities", len(vulnerabilities))
 
     st.divider()
 
-    if vuln_files:
-        st.subheader(f"{len(vuln_files)} vulnerability report(s)")
-        for vf in vuln_files:
-            content = dedupe_repeated_headings(vf.read_text(errors="replace"))
-            first_line = content.splitlines()[0] if content else vf.stem
-            title = first_line.lstrip("#").strip() or vf.stem
+    if vulnerabilities:
+        st.subheader(f"{len(vulnerabilities)} vulnerability report(s)")
+        for filename, content in sorted(vulnerabilities.items()):
+            content = dedupe_repeated_headings(content)
+            first_line = content.splitlines()[0] if content else filename
+            title = first_line.lstrip("#").strip() or filename
             with st.expander(title, expanded=True):
                 st.markdown(content)
     else:
         st.success("No vulnerabilities reported")
 
-    report_path = run_dir / "penetration_test_report.md"
-    if report_path.exists():
+    if report_content:
         st.divider()
         st.subheader("Full penetration test report")
-        st.markdown(dedupe_repeated_headings(report_path.read_text(errors="replace")))
+        st.markdown(dedupe_repeated_headings(report_content))
 
-    sarif_path = run_dir / "findings.sarif"
-    if sarif_path.exists():
+    if sarif_bytes:
         st.download_button(
             "Download SARIF",
-            data=sarif_path.read_bytes(),
+            data=sarif_bytes,
             file_name="findings.sarif",
             mime="application/json",
-            key=f"sarif_{run_dir.name}",
+            key=f"sarif_{run_name}",
         )
 
-    st.info(f"Ask questions about this run in the **Chat** tab — it's preselected for `{run_dir.name}`.")
-    st.session_state.chat_run_choice = run_dir.name
+    st.info(f"Ask questions about this run in the **Chat** tab — it's preselected for `{run_name}`.")
+    st.session_state.chat_run_choice = run_name
 
 
 def _esc(value: object) -> str:
@@ -1237,6 +1417,13 @@ def render_new_scan_tab() -> None:
             time.sleep(2)
             st.rerun()
         else:
+            if st.session_state.run_dir:
+                finished_run_dir = Path(st.session_state.run_dir)
+                fileurl = upload_report_to_blob(
+                    finished_run_dir, finished_run_dir.name, load_env_file()
+                )
+                if fileurl:
+                    set_run_fileurl(finished_run_dir.name, fileurl)
             st.session_state.process = None
             st.rerun()
 

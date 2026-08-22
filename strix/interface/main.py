@@ -171,7 +171,7 @@ async def warm_up_llm(show_model_warning: bool = True) -> None:
             console.print(
                 Panel(
                     warn_text,
-                    title="[bold white]STRIX",
+                    title="[bold white]MEERKATX",
                     title_align="left",
                     border_style="yellow",
                     padding=(1, 2),
@@ -198,7 +198,7 @@ async def warm_up_llm(show_model_warning: bool = True) -> None:
             console.print(
                 Panel(
                     warn_text,
-                    title="[bold white]STRIX",
+                    title="[bold white]MEERKATX",
                     title_align="left",
                     border_style="yellow",
                     padding=(1, 2),
@@ -316,7 +316,7 @@ def display_completion_message(args: argparse.Namespace, results_path: Path) -> 
 
     panel = Panel(
         panel_content,
-        title="[bold white]STRIX",
+        title="[bold white]MEERKATX",
         title_align="left",
         border_style=border_style,
         padding=(1, 2),
@@ -343,7 +343,7 @@ def _print_error_panel(title: str, message: str) -> None:
     error_text.append(message, style="white")
     panel = Panel(
         error_text,
-        title="[bold white]STRIX",
+        title="[bold white]MEERKATX",
         title_align="left",
         border_style="red",
         padding=(1, 2),
@@ -376,7 +376,7 @@ def _print_model_connection_error(exc: BaseException, model_name: str) -> None:
 
     panel = Panel(
         error_text,
-        title="[bold white]STRIX",
+        title="[bold white]MEERKATX",
         title_align="left",
         border_style=border_style,
         padding=(1, 2),

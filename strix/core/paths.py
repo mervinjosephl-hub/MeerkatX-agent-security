@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-RUNS_DIR_NAME = "strix_runs"
+RUNS_DIR_NAME = "meerkatx"
 RUNTIME_STATE_DIR_NAME = ".state"
 RUN_RECORD_FILENAME = "run.json"
 
