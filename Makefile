@@ -1,4 +1,4 @@
-.PHONY: help install dev-install format lint type-check security check-all clean pre-commit setup-dev dev viewer wheel tui-build tui-test tui-lint
+.PHONY: help install dev-install format lint type-check security check-all clean pre-commit setup-dev dev viewer wheel tui-build tui-test tui-lint briefed-scan
 
 TUI_BINARY := build/sidecar/strix-tui$(if $(filter Windows_NT,$(OS)),.exe)
 
@@ -23,6 +23,11 @@ help:
 	@echo "  tui-build     - Build the Bubble Tea TUI"
 	@echo "  tui-test      - Test the Bubble Tea TUI"
 	@echo "  tui-lint      - Vet and format-check the Bubble Tea TUI"
+	@echo ""
+	@echo "Benchmark-briefed scanning:"
+	@echo "  briefed-scan  - Generate AgentDojo + InjecAgent briefings, merge them,"
+	@echo "                  then run strix with the combined instruction file."
+	@echo "                  Usage: make briefed-scan ARGS=\"--target <url>\""
 
 install:
 	uv sync --no-dev
@@ -77,6 +82,9 @@ viewer:
 	@echo "🖥️  Building the local-viewer SPA..."
 	cd strix/interface/viewer/frontend && npm ci && npm run build
 	@echo "✅ Viewer built to strix/interface/viewer/static/ (commit the changes)."
+
+briefed-scan:
+	@./docs/run_briefed_scan.sh $(ARGS)
 
 wheel:
 	uv build --wheel

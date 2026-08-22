@@ -240,6 +240,11 @@ strix --target api.your-app.com --instruction "Focus on business logic flaws and
 # Provide detailed instructions through file (e.g., rules of engagement, scope, exclusions)
 strix --target api.your-app.com --instruction-file ./instruction.md
 
+# AgentDojo-derived prompt-injection and tool-misuse profile for the order-lookup sandbox
+strix -n --target "$BASE_URL" \
+  --instruction-file ./docs/agentdojo-order-lookup-instructions.md \
+  --max-budget 20
+
 # Force PR diff-scope against a specific base branch
 strix -n --target ./ --scan-mode quick --scope-mode diff --diff-base origin/main
 ```
