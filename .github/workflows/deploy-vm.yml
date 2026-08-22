@@ -3,7 +3,7 @@ name: Deploy to MeerkatX VM
 on:
   push:
     branches:
-      - feature/InjecAgent
+      - main
   workflow_dispatch:
 
 jobs:
