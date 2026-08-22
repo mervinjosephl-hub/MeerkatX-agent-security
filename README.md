@@ -53,58 +53,105 @@ git clone https://github.com/mervinjosephl-hub/MeerkatX-agent-security.git
 cd MeerkatX-agent-security
 uv sync
 
-# Configure your LLM provider
-cat > .env <<EOF
-STRIX_LLM=openai/gpt-5-mini
-LLM_API_KEY=your-api-key
-EOF
-
 # Launch the web UI
-uv run --with streamlit --with certifi streamlit run streamlit_ui/app.py
+uv run --with streamlit --with certifi --with azure-storage-blob streamlit run streamlit_ui/app.py
 ```
 
 The UI opens at `http://localhost:8501` — sign up, launch a scan, watch it run
 live, and browse results and history from the dashboard.
 
-### Command-line usage
-
-The underlying engine is also fully usable headless, without the UI:
-
-```bash
-# Scan a local codebase
-uv run strix --target ./app-directory
-
-# Black-box web application assessment
-uv run strix --target https://your-app.com
-
-# Non-interactive, for scripts/CI — exits non-zero if vulnerabilities are found
-uv run strix -n --target https://your-app.com
-```
-
 See [`AGENTS.md`](AGENTS.md) for the full CLI reference.
 
 ## Architecture
 
-- **`streamlit_ui/`** — the MeerkatX web front end: per-user auth, scan
-  launcher, live progress, results/history dashboard, and a report-grounded
-  chatbot.
-- **`strix/`** — the underlying multi-agent scanning engine: reconnaissance,
-  exploitation, and validation agents that run against the target in a sandboxed
-  environment and write structured, evidenced findings.
-- Deployment: a single Azure VM running the UI behind nginx/Let's Encrypt, with
-  a GitHub Actions pipeline that redeploys on every push (see
-  `.github/workflows/deploy-vm.yml`).
+```mermaid
+flowchart LR
+    User((User)) --> Browser["Browser<br/>(client's own machine)"]
+
+    subgraph GH["GitHub"]
+        Repo["mervinjosephl-hub/strix-agent-security<br/>(branch: main)"]
+        Actions["GitHub Actions<br/>deploy-vm"]
+        Secrets["Repo Secrets<br/>VM_SSH_KEY / VM_HOST / VM_USER"]
+        Repo -- "git push" --> Actions
+        Actions -- uses --> Secrets
+    end
+
+    subgraph Azure["Azure — Subscription: Innovation Sprint 2026 - Hackathon<br/>Resource Group: hackathon-rg-extramile (East US)"]
+        DNS["Public IP + DNS label<br/>meerkatx-demo.eastus.cloudapp.azure.com"]
+
+        subgraph VM["meerkatx-vm — Standard_D4as_v7, Ubuntu 24.04 (4 vCPU / 16 GiB)"]
+            Nginx["nginx — reverse proxy"]
+
+            subgraph Svc["systemd — meerkatx.service (enabled, Restart=on-failure)"]
+                UI["MeerkatX UI (Streamlit)<br/>streamlit_ui/app.py<br/>bound 127.0.0.1:8501<br/>auth · scan launcher/live progress · dashboard/history/chat"]
+                DB[("users.db<br/>(SQLite)")]
+            end
+
+            subgraph Docker["Docker Engine"]
+                Sandbox["Strix sandbox container(s)"]
+                Agent["Agent Create And Run"]
+                Sandbox --> Agent
+            end
+
+            Runs["strix_runs//<br/>run.json · penetration_test_report.md · vulnerabilities/*.md"]
+            DeployKey["read-only deploy key<br/>(git pull only)"]
+        end
+
+        Storage[("Azure Storage<br/>(reports)")]
+    end
+
+    OpenRouter["Open Router<br/>STRIX_LLM / LLM_API_KEY / LLM_API_BASE"]
+
+    Browser --> DNS --> Nginx --> UI
+    UI <--> DB
+    UI <--> Docker
+    Agent --> OpenRouter
+    Docker --> Runs --> Storage
+    Actions -- "SSH: fetch/reset/uv sync/<br/>restart service + health-check" --> Svc
+    Repo -.-> DeployKey
+```
 
 ## Configuration
 
 ```bash
-export STRIX_LLM="openai/gpt-5-mini"
+export STRIX_LLM="openrouter/anthropic/claude-sonnet-5"
 export LLM_API_KEY="your-api-key"
 
 # Optional
 export LLM_API_BASE="your-api-base-url"   # for a custom/self-hosted endpoint
 export STRIX_REASONING_EFFORT="high"      # thinking effort (default: high)
+
+# Optional — archives each completed scan's report to a private Azure Blob
+# Storage container ("reports") and reads the History tab back from there
+# instead of local disk. Without it, the app works exactly as before.
+export AZURE_STORAGE_CONNECTION_STRING="your-connection-string"
 ```
+
+## Supported models
+
+`STRIX_LLM` accepts any [LiteLLM](https://docs.litellm.ai/docs/providers) model
+id (`provider/model`), so any OpenAI-compatible or LiteLLM-supported provider
+works out of the box. `vertex_ai/...` and `bedrock/...` need the extra auth
+SDKs: `uv sync --extra vertex` / `uv sync --extra bedrock`.
+
+Recommended / tested models:
+
+- **OpenAI** — `openai/gpt-5.6`, `openai/gpt-5.5-pro`, `openai/gpt-5.5`,
+  `openai/gpt-5.4`, `openai/gpt-5.3-codex`
+- **Anthropic** — `anthropic/claude-fable-5`, `anthropic/claude-opus-5`,
+  `anthropic/claude-opus-4-8`, `anthropic/claude-sonnet-5`,
+  `anthropic/claude-sonnet-4-6`
+- **Google** — `vertex_ai/gemini-3.1-pro-preview`,
+  `gemini/gemini-3.1-pro-preview`, `gemini/gemini-3.6-flash`
+- **DeepSeek** — `deepseek/deepseek-v4-pro`, `deepseek/deepseek-v4-flash`
+- **Qwen (DashScope)** — `dashscope/qwen3.8-max`,
+  `dashscope/qwen3.7-max-2026-06-08`
+- **Kimi (Moonshot)** — `moonshot/kimi-k3`, `moonshot/kimi-k2.7-code`
+
+Using a model outside this list still works — Strix just prints a one-time
+quality warning at startup rather than blocking the run. If you're on a
+ChatGPT subscription rather than an API key, use `STRIX_LLM=chatgpt/<model>`
+(see `strix auth login`).
 
 ## Contributing
 
