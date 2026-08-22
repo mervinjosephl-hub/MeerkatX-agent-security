@@ -8,6 +8,8 @@
 
 **Built by Team ExtraMile**
 
+[📄 MVP Approval Review deck](docs/ppt/MeerkatX.pdf)
+
 </div>
 
 ---
