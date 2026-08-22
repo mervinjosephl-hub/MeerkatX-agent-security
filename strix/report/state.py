@@ -14,6 +14,7 @@ from agents.usage import Usage
 from strix.config import codex
 from strix.config.loader import load_settings
 from strix.core.paths import run_dir_for
+from strix.core.tool_trace import write_tool_trace_summary
 from strix.report.pricing import resolve_litellm_model
 from strix.report.sarif import write_sarif
 from strix.report.usage import LLMUsageLedger
@@ -474,6 +475,15 @@ class ReportState:
                 )
             except Exception:
                 logger.exception("SARIF emit failed (non-fatal; CSV/MD unaffected)")
+
+            # Human-readable rendering of tool_trace.jsonl (runtime ground-truth
+            # tool-call trace — see strix/core/tool_trace.py). Isolated the same
+            # way as the SARIF emitter: a rendering bug must never break the
+            # rest of artifact saving. No-ops if no trace file exists yet.
+            try:
+                write_tool_trace_summary(run_dir)
+            except Exception:
+                logger.exception("tool trace summary render failed (non-fatal)")
 
             write_run_record(run_dir, self.run_record)
 
