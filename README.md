@@ -160,6 +160,16 @@ ChatGPT subscription rather than an API key, use `STRIX_LLM=chatgpt/<model>`
 Issues and pull requests are welcome — this started as a hackathon build and
 is still actively evolving.
 
+## License
+
+Apache 2.0 — see [`LICENSE`](LICENSE).
+
+MeerkatX is built on top of [Strix](https://github.com/usestrix/strix)
+(Apache 2.0), rebranded and extended by Team ExtraMile with a Streamlit front
+end, Azure Blob Storage archiving, and InjecAgent-based agentic-security
+skills. All credit to the Strix authors for the underlying scanning engine,
+tool set, and agent architecture this builds on.
+
 ---
 
 > [!WARNING]
